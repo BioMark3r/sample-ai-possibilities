@@ -37,12 +37,45 @@ Add `--json` for machine-readable output. Available agents are `gk`, `def`, `mid
 forward shooting opportunity. Their envelope is the stock handler's inner prompt object:
 `teamId`, `myPlayers`, and `gameState`.
 
-Exit status is zero only for a valid action without an exception. Decisions over 500 ms set
-`exceeds_500ms` but are not themselves invalid. Total time includes scenario loading and module
-initialization; model time covers only the Strands agent call. Invalid output is reported, never
-repaired by lab validation. Note that the unchanged stock parser runs first and, by design, may
-recover Python-style JSON, fill some target IDs, or clamp move coordinates; the lab flags tolerant
-JSON recovery as malformed model output.
+Exit status is zero only for a post-parser valid action without an exception. Results separate:
+
+- `total_latency_ms`: the entire CLI-style run, including scenario loading and cold initialization;
+- `cold_start_ms`: loading and initializing the selected stock module;
+- `decision_latency_ms`: warm prompt summarization, model call, and stock parsing;
+- `model_latency_ms`, `parsing_latency_ms`, and `validation_latency_ms`: measured components.
+
+The `exceeds_500ms` decision-budget flag uses **only** `decision_latency_ms`; it does not make an
+otherwise valid action invalid. These local wall-clock figures are diagnostic and are not claims
+about production AgentCore latency.
+
+Raw compliance is reported separately through `raw_strict_json`, `raw_expected_structure`, and
+`tolerant_recovery`. `post_parser_valid` says whether the resulting command passes lab validation
+(`valid_action` remains as a compatibility alias). `parser_normalization` exposes observable player
+or team ID changes, supplied targets, coordinate clamping, and filtered unknown commands. The
+unchanged stock parser remains authoritative and may recover Python-style JSON, supply some target
+IDs, or clamp move coordinates; lab validation does not perform additional repairs.
+
+## Reuse a warm agent
+
+Add the lab's flat `src` directory to `PYTHONPATH`, then initialize once when callers need multiple
+independent decisions:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+```python
+from runner import LocalAgent
+
+agent = LocalAgent("balanced", "mid")
+result1 = agent.run("scenarios/basic_possession.json")
+result2 = agent.run("scenarios/forward_shooting_opportunity.json")
+```
+
+`LocalAgent.run` also accepts an already-loaded scenario dictionary. Each call is independent; this
+API only avoids repeated Python/module/model initialization and does not implement batch
+benchmarking or game progression. The role module's `MY_PLAYER_ID` is always authoritative, so the
+ordering or contents of a fixture's realistic `myPlayers` field cannot change the controlled role.
 
 ## Tests and offline behavior
 
@@ -51,8 +84,8 @@ python -m pytest tests
 ```
 
 Tests load fixtures and exercise selection, strict reporting validation, malformed input/output,
-timing, and serialization with the model boundary mocked. They do not require AWS credentials,
-Bedrock access, Strands, or AgentCore. Merely inspecting/loading scenario JSON also works offline.
+cold/warm timing, raw compliance, parser normalization, and serialization with the model boundary
+mocked. They do not require AWS credentials, Bedrock access, Strands, or AgentCore. Merely inspecting/loading scenario JSON also works offline.
 Actual agent selection/import and decision calls require `strands-agents`; actual decisions require
 AWS credentials and Bedrock model access.
 

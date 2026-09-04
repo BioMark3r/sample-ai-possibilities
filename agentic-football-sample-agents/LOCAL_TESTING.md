@@ -62,11 +62,19 @@ access for the relevant Amazon Nova inference profile through Amazon Bedrock Run
 credentials, a deployed runtime, Node/CDK, Gateway, and Memory are not required for the balanced
 lab path. Offline lab unit tests need none of those AWS resources and mock the adapter boundary.
 
-Model-call latency is naturally exposed around `module.agent(prompt)` and recorded separately.
+The selected module's `MY_PLAYER_ID` is authoritative during local invocation; `myPlayers` is kept
+in fixtures for wire-schema realism but never retargets a role. Model-call latency is naturally
+exposed around `module.agent(prompt)` and recorded separately. The lab also separates stock-module
+initialization, warm decision, parsing, validation, and total single-run time. Its 500 ms warning is
+based on the warm decision measurement. These local measurements isolate useful components but do
+not equal or predict end-to-end production AgentCore latency.
+
 The stock handler's fallback-on-error path is not invoked by this adapter: surfacing an exception
 is intentional for a decision-testing lab. Successful model output still uses the exact stock
-parser (including its documented tolerant JSON recovery), and the result reports when recovery or
-parsing failure made the raw model output malformed.
+parser (including its documented tolerant JSON recovery). Instrumentation around that parser
+reports strict raw JSON compliance and expected structure, tolerant recovery, post-parser validity,
+and observable normalization. `runner.LocalAgent` retains one loaded module and exposes repeated
+`run` calls for future experiments without adding batch behavior.
 
 Current Phase 1 scope is deliberately balanced-team only. Gateway and Memory teams require
 additional live service/session setup, so they are documented but not exposed as misleading local
