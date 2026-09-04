@@ -9,7 +9,7 @@ import pytest
 LAB = Path(__file__).parents[1]
 sys.path.insert(0, str(LAB / "src"))
 sys.path.insert(0, str(LAB.parents[0] / "lib"))
-from adapters import AgentCall, TEAMS
+from adapters import AgentCall, TEAMS, _summarize_with_team_relative_possession
 from analysis import compare_decisions, percentile, summarize
 from benchmarking import run_benchmark
 from runner import LocalAgent, ScenarioError
@@ -132,7 +132,7 @@ def test_shooting_opportunity_has_constrained_envelope_and_goal_context():
     assert state["ball"]["possessionAgentId"] == "agentId_2"
     assert 13 <= _distance(ball, {"x": 55, "y": 0}) <= 28
     assert abs(ball["y"]) <= 12
-    assert any(p["agentId"] == "agentId_5" and p["position"]["x"] >= 50 for p in _players(row, "away"))
+    assert any(p["agentId"] == "agentId_0" and p["position"]["x"] >= 50 for p in _players(row, "away"))
     assert any(ball["x"] < p["position"]["x"] < 55 for p in _players(row, "away"))
 
 
@@ -163,8 +163,25 @@ def test_defensive_shape_is_settled_and_organized_not_transition_geometry():
                           ("loose_ball", "held by free")))
 def test_real_shared_summarizer_identifies_generated_possession(family, expected):
     row = _family(family)
-    prompt = summarize_state(row["payload"]["gameState"], 0, 2, "MID")
+    prompt = _summarize_with_team_relative_possession(
+        summarize_state, row["payload"]["gameState"], 0, 2, "MID"
+    )
     assert expected in prompt
+
+
+def test_opponent_possession_prompt_uses_runtime_team_relative_ids():
+    row = _family("transition_defense", seed=27)
+    state = row["payload"]["gameState"]
+    prompt = _summarize_with_team_relative_possession(summarize_state, state, 0, 2, "MID")
+    possessing_id = state["ball"]["possessionAgentId"].removeprefix("agentId_")
+    assert f"Ball: ({state['ball']['position']['x']:.1f}, {state['ball']['position']['y']:.1f}) " \
+           f"held by OPP player {possessing_id}" in prompt
+    opponents = prompt.split("Opponents:", 1)[1]
+    assert [line.strip().split(":", 1)[0] for line in opponents.splitlines() if line.startswith("  P")] == \
+           ["P0", "P1", "P2", "P3", "P4"]
+    assert all(player["agentId"] in {f"agentId_{index}" for index in range(5)}
+               for player in state["players"])
+    assert "P5" not in prompt and "P9" not in prompt
 
 
 def test_benchmark_warm_reuse_multi_run_persistence_and_summary(tmp_path):

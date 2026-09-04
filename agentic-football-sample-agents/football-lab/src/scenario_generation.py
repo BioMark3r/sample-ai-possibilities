@@ -1,8 +1,8 @@
 """Deterministic, independent synthetic decision-state generation.
 
 Family geometry is intentionally constrained rather than simulated; every row is one decision.
-Home is the controlled team and attacks toward +x. Runtime ``agentId`` values are globally unique
-because the shared summarizer resolves possession by ID before checking the holder's team.
+Home is the controlled team and attacks toward +x. Player IDs are team-relative 0-4, matching the
+repository's current-schema fixture; the lab adapter disambiguates the possessing side by geometry.
 """
 
 from __future__ import annotations
@@ -57,9 +57,8 @@ def generate_corpus(role: str, scenario_set: str, count: int, seed: int) -> list
 
 
 def _player(player_id, team, x, y, rng, *, velocity_x=None):
-    """Build a current-schema player; away IDs 5-9 avoid possession ambiguity."""
-    runtime_id = player_id if team == "home" else player_id + 5
-    return {"agentId": f"agentId_{runtime_id}", "teamCode": team,
+    """Build a current-schema player with the runtime's team-relative role ID."""
+    return {"agentId": f"agentId_{player_id}", "teamCode": team,
             "position": {"x": round(max(FIELD_X[0], min(FIELD_X[1], x)), 3),
                          "y": round(max(FIELD_Y[0], min(FIELD_Y[1], y)), 3)},
             "velocity": {"x": round(rng.uniform(-1.5, 1.5) if velocity_x is None else velocity_x, 3),
@@ -80,8 +79,8 @@ def _base_players(rng):
 
 
 def _set_position(players, team, player_id, x, y):
-    runtime_id = player_id if team == "home" else player_id + 5
-    player = next(item for item in players if item["agentId"] == f"agentId_{runtime_id}")
+    player = next(item for item in players
+                  if item["teamCode"] == team and item["agentId"] == f"agentId_{player_id}")
     player["position"] = {"x": round(x, 3), "y": round(y, 3)}
     return player
 
@@ -165,7 +164,7 @@ def _state(rng: random.Random, role: str, family: str, index: int):
     elapsed = _elapsed_time(rng, index)
     home, away = rng.randrange(5), rng.randrange(5)
     ball_zone = "defensive" if bx < -18 else "attacking" if bx > 18 else "middle"
-    possession_agent_id = None if free else f"agentId_{carrier_id if carrier_team == 'home' else carrier_id + 5}"
+    possession_agent_id = None if free else f"agentId_{carrier_id}"
     payload = {"name": f"generated-{index:06d}", "teamId": 0, "myPlayers": [controlled],
                "gameState": {"tick": rng.randrange(1, 10000), "gameTime": round(elapsed, 3),
                "playMode": NORMAL_PLAY_MODE, "modeTeamId": None, "score": {"home": home, "away": away},

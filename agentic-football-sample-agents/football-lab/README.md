@@ -85,9 +85,21 @@ structure; `under_pressure` gives the controlled player the ball, a close oppone
 Generated matches use the mechanics reference's five-minute duration (`gameTime` 0–300 seconds)
 and normal-play value `PlayOn`. Older hand-written lab fixtures and shared test fixtures retain
 `OPEN_PLAY`; the summarizer passes either value through as text, but new corpora use the current
-mechanics value. Runtime player IDs are unique across both sides (`agentId_0`–`agentId_4` home,
-`agentId_5`–`agentId_9` away). This is required because the shared summarizer finds a possession
-holder by ID before determining its team; repeated IDs would mislabel away possession as `MY`.
+mechanics value.
+
+Player identity follows the best current repository evidence and is team-relative: both home and
+away use `agentId_0`–`agentId_4`. In particular, `lib/test_helpers.py` is designated as the concrete
+current-schema fixture by `../LOCAL_TESTING.md` and repeats those IDs by `teamCode`; the mechanics
+example uses `playerId` together with `teamId`; and `lib/parsing.py` defaults opponent MARK/FOLLOW
+targets to role ID `0`. The isolated forward fallback example using `agentId_6` has no matching
+player in its imported fixture, so it is not treated as authoritative runtime evidence.
+
+The stock summarizer looks up `possessionAgentId` without a team component and would select the
+first same-ID player. To keep realistic P0–P4 model-facing identities while correctly saying `MY`
+or `OPP`, the lab adapter calls the unchanged stock summarizer and corrects only ambiguous
+possession text using the matching player's distance to the ball. Generated possession holders
+are exactly at the ball. This compatibility step is lab-only; no shared or deployed stock code is
+modified.
 
 ```bash
 python generate_scenarios.py --role mid --scenario-set transition --count 100 --seed 42 \
