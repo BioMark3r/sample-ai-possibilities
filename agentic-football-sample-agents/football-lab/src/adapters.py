@@ -1,9 +1,10 @@
-"""Thin local adapter around the balanced team's public module globals."""
+"""Thin local adapter around stock teams' public module globals."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 import types
 from dataclasses import dataclass
@@ -13,7 +14,11 @@ from typing import Callable
 
 ROLE_DIRS = {"gk": "ai-gk", "def": "ai-def", "mid": "ai-mid", "fwd1": "ai-fwd1", "fwd2": "ai-fwd2"}
 ROLE_LABELS = {key: key.upper() for key in ROLE_DIRS}
-TEAMS = {"balanced": "ai-team-strands-balanced"}
+TEAMS = {
+    "balanced": "ai-team-strands-balanced",
+    "extremely-aggressive": "ai-team-strands-extremely-aggressive",
+    "extremely-defensive": "ai-team-strands-extremely-defensive",
+}
 
 
 @dataclass
@@ -84,7 +89,9 @@ def invoke_stock_agent(module, payload: dict, clock: Callable[[], float]) -> Age
     # The selected stock role, not scenario ordering, determines the controlled player.
     player_id = module.MY_PLAYER_ID
     decision_start = clock()
-    prompt = summarize_state(game_state, team_id, player_id, module.POSITION_LABEL)
+    prompt = _summarize_with_team_relative_possession(
+        summarize_state, game_state, team_id, player_id, module.POSITION_LABEL
+    )
     model_start = clock()
     response = module.agent(prompt)
     model_end = clock()
@@ -125,6 +132,37 @@ def invoke_stock_agent(module, payload: dict, clock: Callable[[], float]) -> Age
         tolerant_recovery=bool(recovered),
         normalization=normalization,
     )
+
+
+def _summarize_with_team_relative_possession(summarizer, game_state, team_id, player_id, label):
+    """Correct only ambiguous possession text for current team-relative IDs.
+
+    The current fixture repeats agentId_0..4 for each team, while ``possessionAgentId`` has no team
+    component. Generated carriers are placed exactly at the ball, so nearest matching-ID geometry
+    identifies the side. The stock helper remains untouched and continues producing the full prompt.
+    """
+    prompt = summarizer(game_state, team_id, player_id, label)
+    ball = game_state.get("ball", {})
+    possession_id = ball.get("possessionAgentId")
+    if possession_id is None:
+        return prompt
+    candidates = [player for player in game_state.get("players", [])
+                  if player.get("agentId") == possession_id]
+    if len(candidates) < 2:
+        return prompt
+    ball_position = ball.get("position", {})
+    holder = min(candidates, key=lambda candidate: math.dist(
+        (candidate.get("position", {}).get("x", 0), candidate.get("position", {}).get("y", 0)),
+        (ball_position.get("x", 0), ball_position.get("y", 0))))
+    my_team_code = "home" if team_id == 0 else "away"
+    side = "MY" if holder.get("teamCode") == my_team_code else "OPP"
+    numeric_id = possession_id.rsplit("_", 1)[-1]
+    current_side = "MY" if f"held by MY player {numeric_id}" in prompt else "OPP"
+    prompt = prompt.replace(f"held by {current_side} player {numeric_id}",
+                            f"held by {side} player {numeric_id}", 1)
+    if numeric_id == str(player_id):
+        prompt = prompt.replace(" hasBall=True", f" hasBall={side == 'MY'}", 1)
+    return prompt
 
 
 def _normalization(before, after, team_id, player_id, valid_commands) -> dict[str, bool]:

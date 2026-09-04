@@ -1,8 +1,16 @@
-# Agentic Football decision-testing lab
+# Agentic Football local benchmarking lab
 
-This Phase 1 lab runs a saved current-schema `gameState` through an unchanged balanced sample
-agent and reports the parsed command, validity, exceptions, and latency. It is intentionally
-separate from every agent and deployment directory.
+The lab runs independent, deterministic decision states through unchanged stock agents. Phase 2
+adds corpus generation, repeatable benchmarking, SQLite experiments, paired tactical comparison,
+and Markdown reports while preserving the Phase 1 single-scenario API. It deliberately does not
+implement game physics, ticks, matches, prompt optimization, or deployment.
+
+The architecture is intentionally one-way:
+
+```text
+scenario generation -> immutable JSONL corpus -> LocalAgent -> decision result
+                    -> experiment store -> analysis/reporting
+```
 
 ## Setup
 
@@ -55,6 +63,87 @@ or team ID changes, supplied targets, coordinate clamping, and filtered unknown 
 unchanged stock parser remains authoritative and may recover Python-style JSON, supply some target
 IDs, or clamp move coordinates; lab validation does not perform additional repairs.
 
+Stock teams available locally are `balanced`, `extremely-aggressive`, and `extremely-defensive`.
+Gateway and Memory remain excluded because they need additional services.
+
+## Generate and benchmark
+
+Every JSONL row has separate `metadata` and `payload` objects. The payload remains directly
+compatible with `LocalAgent`; metadata records the ID, family, seed, role, player, possession,
+ball zone, score state, time bucket, and pressure. Supported families are `possession`,
+`transition_attack`, `transition_defense`, `under_pressure`, `shooting_opportunity`, `loose_ball`,
+and `defensive_shape`. `transition` selects both transition families and `all` cycles all families.
+
+Family invariants are encoded in generated geometry: `possession` is settled with moderate
+pressure; `transition_attack` has advancing home possession, forward support, space, and unset
+opponents; `transition_defense` has an advancing away carrier against recovering, incomplete home
+structure; `under_pressure` gives the controlled player the ball, a close opponent, and outlets;
+`shooting_opportunity` constrains goal distance/angle and includes goalkeeper/defender context;
+`loose_ball` places both sides within contesting distance of a moving free ball; and
+`defensive_shape` puts an organized home block behind settled away possession.
+
+Generated matches use the mechanics reference's five-minute duration (`gameTime` 0–300 seconds)
+and normal-play value `PlayOn`. Older hand-written lab fixtures and shared test fixtures retain
+`OPEN_PLAY`; the summarizer passes either value through as text, but new corpora use the current
+mechanics value.
+
+Player identity follows the best current repository evidence and is team-relative: both home and
+away use `agentId_0`–`agentId_4`. In particular, `lib/test_helpers.py` is designated as the concrete
+current-schema fixture by `../LOCAL_TESTING.md` and repeats those IDs by `teamCode`; the mechanics
+example uses `playerId` together with `teamId`; and `lib/parsing.py` defaults opponent MARK/FOLLOW
+targets to role ID `0`. The isolated forward fallback example using `agentId_6` has no matching
+player in its imported fixture, so it is not treated as authoritative runtime evidence.
+
+The stock summarizer looks up `possessionAgentId` without a team component and would select the
+first same-ID player. To keep realistic P0–P4 model-facing identities while correctly saying `MY`
+or `OPP`, the lab adapter calls the unchanged stock summarizer and corrects only ambiguous
+possession text using the matching player's distance to the ball. Generated possession holders
+are exactly at the ball. This compatibility step is lab-only; no shared or deployed stock code is
+modified.
+
+```bash
+python generate_scenarios.py --role mid --scenario-set transition --count 100 --seed 42 \
+  --output generated/transition-mid-seed42.jsonl
+python benchmark.py --team balanced --agent mid \
+  --scenarios generated/transition-mid-seed42.jsonl --runs 1 \
+  --output results/balanced-mid-transition.json
+python compare.py --scenario-set generated/transition-mid-seed42.jsonl \
+  --config balanced:mid --config extremely-aggressive:mid \
+  --output results/transition-comparison.json
+python report.py --comparison results/transition-comparison.json \
+  --output results/transition-comparison.md
+```
+
+All commands provide `--help`. `benchmark.py` and `compare.py` default to
+`results/football_lab.sqlite`, create it automatically, and print structured JSON. A benchmark
+uses exactly one warm `LocalAgent` per team/role and `--runs N` repeats every state N times.
+Comparison loads the corpus once and passes the same unchanged in-memory rows to each configuration.
+
+### First balanced-vs-aggressive MID experiment
+
+From `football-lab/`, run exactly:
+
+```bash
+python generate_scenarios.py --role mid --scenario-set all --count 500 --seed 42 \
+  --output generated/all-mid-seed42.jsonl
+python compare.py --scenario-set generated/all-mid-seed42.jsonl \
+  --config balanced:mid --config extremely-aggressive:mid --runs 1 \
+  --database results/football_lab.sqlite --output results/balanced-v-aggressive-mid.json
+python report.py --comparison results/balanced-v-aggressive-mid.json \
+  --output results/balanced-v-aggressive-mid.md
+```
+
+The database contains `benchmarks` (configuration, corpus digest, creation time), `scenarios`
+(metadata and exact payload JSON), and `decisions` (one stable result JSON per scenario/run).
+Initialization and migrations use `CREATE TABLE IF NOT EXISTS`; no manual setup is required.
+
+Summaries report decision count; post-parser validity, strict JSON, tolerant recovery,
+normalization, exception, and >500 ms percentages; decision/model p50 and p95; action distribution;
+and role/family breakdowns. Paired comparisons report same/different command percentages plus pass,
+shoot, move, press, intercept, aggressive, and defensive rates. The explicit aggressive mapping is
+`SHOOT`, `PRESS_BALL`, `SLIDE_TACKLE`, `INTERCEPT`; the defensive mapping is `MARK`,
+`FOLLOW_PLAYER`, `INTERCEPT`, `SLIDE_TACKLE`, `SET_STANCE`. These describe behavior, not quality.
+
 ## Reuse a warm agent
 
 Add the lab's flat `src` directory to `PYTHONPATH`, then initialize once when callers need multiple
@@ -73,8 +162,7 @@ result2 = agent.run("scenarios/forward_shooting_opportunity.json")
 ```
 
 `LocalAgent.run` also accepts an already-loaded scenario dictionary. Each call is independent; this
-API only avoids repeated Python/module/model initialization and does not implement batch
-benchmarking or game progression. The role module's `MY_PLAYER_ID` is always authoritative, so the
+API avoids repeated Python/module/model initialization and does not implement game progression. The role module's `MY_PLAYER_ID` is always authoritative, so the
 ordering or contents of a fixture's realistic `myPlayers` field cannot change the controlled role.
 
 ## Tests and offline behavior
@@ -91,9 +179,8 @@ AWS credentials and Bedrock model access.
 
 ## Known limitations
 
-- Only the reference `balanced` team is enabled in Phase 1. Gateway and Memory variants have extra
-  service dependencies and are not silently degraded.
-- This is one invocation, not physics, game progression, team-vs-team simulation, or benchmarking.
+- Gateway and Memory variants have extra service dependencies and are not silently degraded.
+- Scenarios are independent synthetic decision probes, not realistic physics or progression.
 - Timeouts are reported when the underlying AWS/model SDK raises one. The harness measures elapsed
   time but does not terminate an in-flight SDK call; configure botocore/model timeouts externally.
 - The adapter follows the stock handler's successful model path but deliberately reports model
