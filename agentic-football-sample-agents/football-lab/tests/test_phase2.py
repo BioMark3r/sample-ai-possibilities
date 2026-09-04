@@ -8,11 +8,15 @@ import pytest
 
 LAB = Path(__file__).parents[1]
 sys.path.insert(0, str(LAB / "src"))
+sys.path.insert(0, str(LAB.parents[0] / "lib"))
 from adapters import AgentCall, TEAMS
 from analysis import compare_decisions, percentile, summarize
 from benchmarking import run_benchmark
 from runner import LocalAgent, ScenarioError
-from scenario_generation import FAMILIES, generate_corpus, load_corpus, write_corpus
+from scenario_generation import (EARLY_END_SECONDS, FAMILIES, LATE_START_SECONDS,
+                                 MATCH_DURATION_SECONDS, NORMAL_PLAY_MODE,
+                                 generate_corpus, load_corpus, write_corpus)
+from state import summarize_state
 
 
 COMMAND = [{"commandType": "PASS", "playerId": 2, "teamId": 0,
@@ -48,11 +52,119 @@ def test_generated_schema_and_ranges(tmp_path):
         metadata, state = row["metadata"], row["payload"]["gameState"]
         assert metadata["controlled_player_id"] == 2
         assert len(state["players"]) == 10
+        assert 0 <= state["gameTime"] <= MATCH_DURATION_SECONDS
+        assert state["playMode"] == NORMAL_PLAY_MODE
         assert -55 <= state["ball"]["position"]["x"] <= 55
         assert -35 <= state["ball"]["position"]["y"] <= 35
         assert all(-55 <= p["position"]["x"] <= 55 and -35 <= p["position"]["y"] <= 35 for p in state["players"])
     path = tmp_path / "corpus.jsonl"; write_corpus(rows, path)
     assert load_corpus(path) == rows
+
+
+def _family(name, seed=9):
+    return generate_corpus("mid", name, 1, seed)[0]
+
+
+def _players(row, team):
+    return [player for player in row["payload"]["gameState"]["players"] if player["teamCode"] == team]
+
+
+def _distance(left, right):
+    return ((left["x"] - right["x"]) ** 2 + (left["y"] - right["y"]) ** 2) ** .5
+
+
+def test_time_buckets_cover_five_minute_match_and_late_means_near_end():
+    rows = generate_corpus("mid", "all", 30, 51)
+    by_bucket = {name: [] for name in ("early", "middle", "late")}
+    for row in rows:
+        by_bucket[row["metadata"]["time_remaining_bucket"]].append(row["payload"]["gameState"]["gameTime"])
+    assert all(by_bucket.values())
+    assert all(time < EARLY_END_SECONDS for time in by_bucket["early"])
+    assert all(EARLY_END_SECONDS <= time < LATE_START_SECONDS for time in by_bucket["middle"])
+    assert all(LATE_START_SECONDS <= time <= MATCH_DURATION_SECONDS for time in by_bucket["late"])
+    assert all(MATCH_DURATION_SECONDS - time <= 75 for time in by_bucket["late"])
+
+
+def test_possession_is_settled_with_moderate_pressure():
+    row = _family("possession")
+    state = row["payload"]["gameState"]
+    ball = state["ball"]["position"]
+    assert row["metadata"]["possession_team"] == "home"
+    assert state["ball"]["velocity"]["x"] <= .5
+    assert 6 <= min(_distance(player["position"], ball) for player in _players(row, "away")) <= 10
+
+
+def test_transition_attack_has_forward_support_and_unset_opponents():
+    row = _family("transition_attack")
+    state = row["payload"]["gameState"]
+    ball_x = state["ball"]["position"]["x"]
+    controlled = next(p for p in _players(row, "home") if p["agentId"] == "agentId_2")
+    assert row["metadata"]["possession_team"] == "home"
+    assert state["ball"]["velocity"]["x"] > 0
+    assert any(p["position"]["x"] >= controlled["position"]["x"] + 10 for p in _players(row, "home"))
+    assert sum(p["position"]["x"] < ball_x for p in _players(row, "away")) >= 3
+
+
+def test_transition_defense_has_advancing_opponent_and_recovery_geometry():
+    row = _family("transition_defense")
+    state = row["payload"]["gameState"]
+    ball_x = state["ball"]["position"]["x"]
+    controlled = next(p for p in _players(row, "home") if p["agentId"] == "agentId_2")
+    assert row["metadata"]["possession_team"] == "away"
+    assert state["ball"]["velocity"]["x"] < 0
+    assert controlled["position"]["x"] > ball_x
+    assert any(p["position"]["x"] < ball_x for p in _players(row, "away"))
+    assert sum(p["position"]["x"] > ball_x for p in _players(row, "home")) >= 3
+
+
+def test_under_pressure_has_close_opponent_and_viable_outlets():
+    row = _family("under_pressure")
+    ball = row["payload"]["gameState"]["ball"]["position"]
+    assert row["payload"]["gameState"]["ball"]["possessionAgentId"] == "agentId_2"
+    assert min(_distance(player["position"], ball) for player in _players(row, "away")) < 4
+    assert sum(8 <= _distance(player["position"], ball) <= 20 for player in _players(row, "home")) >= 2
+
+
+def test_shooting_opportunity_has_constrained_envelope_and_goal_context():
+    row = _family("shooting_opportunity")
+    state = row["payload"]["gameState"]
+    ball = state["ball"]["position"]
+    assert state["ball"]["possessionAgentId"] == "agentId_2"
+    assert 13 <= _distance(ball, {"x": 55, "y": 0}) <= 28
+    assert abs(ball["y"]) <= 12
+    assert any(p["agentId"] == "agentId_5" and p["position"]["x"] >= 50 for p in _players(row, "away"))
+    assert any(ball["x"] < p["position"]["x"] < 55 for p in _players(row, "away"))
+
+
+def test_loose_ball_is_free_and_both_sides_contest_it():
+    row = _family("loose_ball")
+    ball_state = row["payload"]["gameState"]["ball"]
+    ball = ball_state["position"]
+    assert ball_state["isFree"] and ball_state["possessionAgentId"] is None
+    assert min(_distance(p["position"], ball) for p in _players(row, "home")) <= 4.2
+    assert min(_distance(p["position"], ball) for p in _players(row, "away")) <= 4.2
+
+
+def test_defensive_shape_is_settled_and_organized_not_transition_geometry():
+    shaped = _family("defensive_shape")
+    transition = _family("transition_defense")
+    ball_x = shaped["payload"]["gameState"]["ball"]["position"]["x"]
+    outfield_x = sorted(p["position"]["x"] for p in _players(shaped, "home") if p["agentId"] != "agentId_0")
+    assert shaped["metadata"]["possession_team"] == "away"
+    assert all(x < ball_x for x in outfield_x)
+    assert max(outfield_x) - min(outfield_x) >= 15
+    assert abs(shaped["payload"]["gameState"]["ball"]["velocity"]["x"]) <= .5
+    assert transition["payload"]["gameState"]["ball"]["velocity"]["x"] < -1.5
+
+
+@pytest.mark.parametrize(("family", "expected"),
+                         (("under_pressure", "held by MY player 2"),
+                          ("transition_defense", "held by OPP player"),
+                          ("loose_ball", "held by free")))
+def test_real_shared_summarizer_identifies_generated_possession(family, expected):
+    row = _family(family)
+    prompt = summarize_state(row["payload"]["gameState"], 0, 2, "MID")
+    assert expected in prompt
 
 
 def test_benchmark_warm_reuse_multi_run_persistence_and_summary(tmp_path):

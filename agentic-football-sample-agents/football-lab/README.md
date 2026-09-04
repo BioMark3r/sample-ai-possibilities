@@ -74,6 +74,21 @@ ball zone, score state, time bucket, and pressure. Supported families are `posse
 `transition_attack`, `transition_defense`, `under_pressure`, `shooting_opportunity`, `loose_ball`,
 and `defensive_shape`. `transition` selects both transition families and `all` cycles all families.
 
+Family invariants are encoded in generated geometry: `possession` is settled with moderate
+pressure; `transition_attack` has advancing home possession, forward support, space, and unset
+opponents; `transition_defense` has an advancing away carrier against recovering, incomplete home
+structure; `under_pressure` gives the controlled player the ball, a close opponent, and outlets;
+`shooting_opportunity` constrains goal distance/angle and includes goalkeeper/defender context;
+`loose_ball` places both sides within contesting distance of a moving free ball; and
+`defensive_shape` puts an organized home block behind settled away possession.
+
+Generated matches use the mechanics reference's five-minute duration (`gameTime` 0–300 seconds)
+and normal-play value `PlayOn`. Older hand-written lab fixtures and shared test fixtures retain
+`OPEN_PLAY`; the summarizer passes either value through as text, but new corpora use the current
+mechanics value. Runtime player IDs are unique across both sides (`agentId_0`–`agentId_4` home,
+`agentId_5`–`agentId_9` away). This is required because the shared summarizer finds a possession
+holder by ID before determining its team; repeated IDs would mislabel away possession as `MY`.
+
 ```bash
 python generate_scenarios.py --role mid --scenario-set transition --count 100 --seed 42 \
   --output generated/transition-mid-seed42.jsonl
