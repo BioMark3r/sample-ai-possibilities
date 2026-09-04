@@ -1,4 +1,4 @@
-"""Thin local adapter around the balanced team's public module globals."""
+"""Thin local adapter around stock teams' public module globals."""
 
 from __future__ import annotations
 
@@ -13,7 +13,11 @@ from typing import Callable
 
 ROLE_DIRS = {"gk": "ai-gk", "def": "ai-def", "mid": "ai-mid", "fwd1": "ai-fwd1", "fwd2": "ai-fwd2"}
 ROLE_LABELS = {key: key.upper() for key in ROLE_DIRS}
-TEAMS = {"balanced": "ai-team-strands-balanced"}
+TEAMS = {
+    "balanced": "ai-team-strands-balanced",
+    "extremely-aggressive": "ai-team-strands-extremely-aggressive",
+    "extremely-defensive": "ai-team-strands-extremely-defensive",
+}
 
 
 @dataclass
