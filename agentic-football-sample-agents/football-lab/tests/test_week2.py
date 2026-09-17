@@ -54,6 +54,46 @@ def test_full_state_geometry_mapping_and_immutability(store, payload):
     assert payload == original
 
 
+def test_controlled_player_inference_and_explicit_precedence(store, payload):
+    inferred=store.observe("week2-001", "fwd1", "unknown", payload=payload)
+    assert inferred["controlled_player_id"] == 3
+    changed=deepcopy(payload); changed["myPlayers"] = [2, 3]
+    explicit=store.observe("week2-001", "fwd1", "unknown", payload=changed,
+                           controlled_player_id=3, notes="explicit")
+    assert explicit["controlled_player_id"] == 3
+
+
+def test_observed_action_and_direct_candidate_instruction(store):
+    row=store.observe("week2-001", "fwd1", "missed_shooting_opportunity",
+                      notes="passed", observed_action="PASS",
+                      expected_behavior="shoot when central and unpressured")
+    assert row["observed_action"] == "PASS"
+    instruction=candidate_config(store,"week2-001","missed_shooting_opportunity")["roles"]["fwd1"]["instructions"][0]
+    assert instruction.startswith("When you have possession") and "Consider" not in instruction
+
+
+def test_jsonl_telemetry_import_annotation_filters_and_promotion(store, payload, tmp_path):
+    source=tmp_path/"captured.jsonl"
+    records=[
+        {"request":{"payload":payload},"role":"fwd1","parsed_command":{"commandType":"PASS"},"tick":12},
+        {"role":"mid","modelResponse":"SHOOT","exception":"timeout"},
+        {"payload":{"gameState":{}},"role":"def"},
+        {"noise":"not telemetry"},
+    ]
+    source.write_text("\n".join(json.dumps(r) for r in records)+"\n",encoding="utf-8")
+    summary=store.import_telemetry("week2-001",source)
+    assert summary == {"records_read":4,"full_state_observations":1,
+                       "partial_observations":2,"ignored_unrecognized":1}
+    full=store.observations("week2-001",role="fwd1",action="PASS",family="shooting_opportunity")
+    assert len(full)==1 and full[0]["problem_type"] == "unknown"
+    original=deepcopy(full[0]["payload"])
+    annotated=store.annotate(full[0]["observation_id"],"missed_shooting_opportunity","high","reviewed")
+    assert annotated["payload"] == original and annotated["observation_id"] == full[0]["observation_id"]
+    one=store.promote(annotated["observation_id"]); two=store.promote(annotated["observation_id"])
+    assert one["metadata"]["scenario_id"] == two["metadata"]["scenario_id"]
+    assert one["metadata"]["controlled_player_id"] == 3
+
+
 def test_payload_validation_and_family_rules(store):
     row=store.observe("week2-001", "def", "poor_marking", payload={"gameState": {}}, notes="bad capture")
     assert row["observation_type"] == "partial" and row["payload_validation_errors"]

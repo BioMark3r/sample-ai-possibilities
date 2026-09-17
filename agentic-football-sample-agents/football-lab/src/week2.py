@@ -11,8 +11,10 @@ from pathlib import Path
 
 try:
     from .validation import validate_scenario
+    from .validation import COMMAND_PARAMETERS
 except ImportError:  # Flat src/ imports used by the command-line tools.
     from validation import validate_scenario
+    from validation import COMMAND_PARAMETERS
 
 ROLES = ("gk", "def", "mid", "fwd1", "fwd2")
 SEVERITIES = ("low", "medium", "high", "critical")
@@ -31,13 +33,80 @@ INFRASTRUCTURE_PROBLEMS = frozenset(("timeout", "throttled", "authentication", "
 INFRASTRUCTURE_STATUS = {"timeout": "timeout", "throttled": "throttled", "authentication": "auth_error",
                          "access_denied": "access_denied", "dependency_failure": "dependency_error",
                          "model_exception": "unknown_error"}
+ROLE_PLAYER_IDS = {"gk": 0, "def": 1, "mid": 2, "fwd1": 3, "fwd2": 4}
 SUGGESTIONS = {
-    "missed_shooting_opportunity": "Consider a narrow tactical candidate clarifying shoot-vs-pass behavior in the attacking zone for {role}.",
-    "over_pressing": "Consider a narrow tactical candidate clarifying press conditions and shape preservation for {role}.",
-    "unnecessary_backward_pass": "Consider a narrow tactical candidate clarifying forward-pass bias during transitions for {role}.",
-    "poor_shot_selection": "Consider a narrow tactical candidate clarifying shot-selection conditions for {role}.",
-    "poor_distribution": "Consider a narrow tactical candidate clarifying safe distribution priorities for {role}.",
+    "missed_shooting_opportunity": "When you have possession in the attacking zone and are within a reasonable shooting distance with a viable path to goal, prefer SHOOT over a backward or lateral PASS unless immediate pressure makes the shot clearly unavailable. Apply this shoot-vs-pass behavior consistently.",
+    "over_pressing": "Do not abandon defensive shape solely to pressure the ball. PRESS_BALL only when the ball carrier can be challenged without exposing a large gap behind you.",
+    "unnecessary_backward_pass": "During an advancing transition, prefer a safe forward PASS or forward movement when available rather than recycling possession backward by default.",
+    "poor_shot_selection": "Use SHOOT only when you have a viable path to goal from a reasonable shooting distance; otherwise retain possession or make a safe PASS.",
+    "poor_distribution": "Distribute to a safely available teammate rather than forcing the ball into immediate pressure.",
 }
+
+
+def infer_controlled_player_id(payload, role=None, explicit=None):
+    """Apply the documented identity precedence without guessing from arbitrary state."""
+    if explicit is not None:
+        return explicit
+    players = payload.get("myPlayers") if isinstance(payload, dict) else None
+    if isinstance(players, list) and len(players) == 1:
+        return players[0]
+    return ROLE_PLAYER_IDS.get(role.lower()) if isinstance(role, str) else None
+
+
+def normalize_action(value):
+    """Return a known command type from a string or common command envelope."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        try:
+            decoded = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            decoded = None
+        if decoded is not None:
+            return normalize_action(decoded)
+        candidate = candidate.upper()
+        return candidate if candidate in COMMAND_PARAMETERS else None
+    if isinstance(value, list):
+        return normalize_action(value[0]) if value else None
+    if isinstance(value, dict):
+        for key in ("commandType", "action_type", "actionType", "action", "command", "parsed_command"):
+            if key in value:
+                found = normalize_action(value[key])
+                if found:
+                    return found
+    return None
+
+
+def _telemetry_value(value, *keys):
+    """Find the first named field in a small, variably wrapped telemetry record."""
+    if not isinstance(value, dict):
+        return None
+    for key in keys:
+        if key in value and value[key] is not None:
+            return value[key]
+    for wrapper in ("request", "response", "payload", "body", "input", "metadata", "telemetry", "event"):
+        found = _telemetry_value(value.get(wrapper), *keys)
+        if found is not None:
+            return found
+    return None
+
+
+def _telemetry_payload(record):
+    """Locate a complete payload while retaining the selected object byte-for-byte logically."""
+    candidates = [record] if "gameState" in record else []
+    for wrapper in ("request", "payload", "body", "input"):
+        value = record.get(wrapper)
+        if isinstance(value, dict):
+            candidates.append(value)
+            for inner in ("payload", "body", "input"):
+                if isinstance(value.get(inner), dict): candidates.append(value[inner])
+    full = next((value for value in candidates if not validate_scenario(value)), None)
+    if full is not None:
+        return deepcopy(full)
+    # An explicitly named payload/game-state envelope is still valuable as a
+    # partial observation.  Do not synthesize absent fields to make it valid.
+    return deepcopy(candidates[0]) if candidates else None
 
 
 def _canonical(value):
@@ -74,9 +143,23 @@ class Week2Store:
         path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return document
 
-    def observations(self, match_id=None):
+    def observations(self, match_id=None, **filters):
         rows = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((self.root / "observations").glob("*.json"))]
-        return [r for r in rows if match_id is None or r["match_id"] == match_id]
+        rows = [r for r in rows if match_id is None or r["match_id"] == match_id]
+        locations = {"family": ("scenario_mapping", "suggested_scenario_family"),
+                     "possession": ("analysis", "possession_side"), "ball_zone": ("analysis", "ball_zone"),
+                     "score_state": ("analysis", "score_state"), "pressure": ("analysis", "pressure_estimate"),
+                     "match_time_bucket": ("analysis", "match_time_bucket")}
+        for name, expected in filters.items():
+            if expected is None: continue
+            if name == "action":
+                rows = [r for r in rows if r.get("observed_action") == expected.upper()]
+            elif name in locations:
+                outer, inner = locations[name]
+                rows = [r for r in rows if r.get(outer, {}).get(inner) == expected]
+            else:
+                rows = [r for r in rows if r.get(name) == expected]
+        return rows
 
     def observe(self, match_id, role=None, problem_type="unknown", severity="medium", payload=None, **fields):
         self._read("matches", match_id)
@@ -89,10 +172,17 @@ class Week2Store:
             raise ValueError(f"severity must be one of: {', '.join(SEVERITIES)}")
         if payload is not None and not isinstance(payload, dict):
             raise ValueError("payload must be a JSON object")
+        controlled_player_id = infer_controlled_player_id(payload, role, fields.get("controlled_player_id"))
+        if "observed_action" in fields and fields["observed_action"] is not None:
+            action = normalize_action(fields["observed_action"])
+            if not action:
+                raise ValueError("observed action must be a known command type")
+            fields["observed_action"] = action
         document = {"match_id": match_id, "problem_type": problem_type, "severity": severity}
         document["infrastructure_status"] = INFRASTRUCTURE_STATUS.get(problem_type, "ok")
         if role: document["role"] = role
         if payload is not None: document["payload"] = deepcopy(payload)
+        if controlled_player_id is not None: fields["controlled_player_id"] = controlled_player_id
         document.update({k: v for k, v in fields.items() if v is not None and v != []})
         if not payload and not document.get("notes"):
             raise ValueError("a partial observation requires notes; otherwise provide a payload")
@@ -101,12 +191,63 @@ class Week2Store:
             document["payload_validation_errors"] = validate_scenario(payload)
         identity_source = deepcopy(document)
         document["observation_id"] = _stable_id("obs", identity_source)
-        if document["observation_type"] == "full_state":
-            document["analysis"] = analyze_state(payload, role, fields.get("controlled_player_id"))
+        if document["observation_type"] == "full_state" and controlled_player_id is not None:
+            document["analysis"] = analyze_state(payload, role, controlled_player_id)
             document["scenario_mapping"] = map_scenario_family(document["analysis"])
+        elif document["observation_type"] == "full_state":
+            document["scenario_mapping"] = {"suggested_scenario_family": "unknown",
+                                            "reasons": ["controlled player could not be inferred"]}
         path = self.root / "observations" / f'{document["observation_id"]}.json'
         path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return document
+
+    def annotate(self, observation_id, problem_type, severity=None, notes=None):
+        row = self._read("observations", observation_id)
+        if problem_type not in taxonomy_values(): raise ValueError(f"unknown problem type: {problem_type}")
+        if severity is not None and severity not in SEVERITIES: raise ValueError(f"severity must be one of: {', '.join(SEVERITIES)}")
+        row["problem_type"] = problem_type
+        row["infrastructure_status"] = INFRASTRUCTURE_STATUS.get(problem_type, "ok")
+        if severity is not None: row["severity"] = severity
+        if notes is not None: row["notes"] = notes
+        (self.root / "observations" / f"{observation_id}.json").write_text(
+            json.dumps(row, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return row
+
+    def import_telemetry(self, match_id, input_path):
+        counts = {"records_read": 0, "full_state_observations": 0,
+                  "partial_observations": 0, "ignored_unrecognized": 0}
+        with Path(input_path).open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip(): continue
+                counts["records_read"] += 1
+                try: record = json.loads(line)
+                except json.JSONDecodeError:
+                    counts["ignored_unrecognized"] += 1; continue
+                if not isinstance(record, dict):
+                    counts["ignored_unrecognized"] += 1; continue
+                payload = _telemetry_payload(record)
+                role = _telemetry_value(record, "role", "playerRole", "player_role")
+                role = role.lower() if isinstance(role, str) and role.lower() in ROLES else None
+                player_id = _telemetry_value(record, "controlled_player_id", "playerId", "player_id")
+                if isinstance(player_id, str) and player_id.isdigit(): player_id = int(player_id)
+                action = normalize_action(_telemetry_value(record, "parsed_command", "parsedCommand", "action", "command", "model_response", "modelResponse"))
+                status = _telemetry_value(record, "exception", "infrastructure_status", "status")
+                useful = payload is not None or role is not None or player_id is not None or action is not None or status is not None
+                if not useful:
+                    counts["ignored_unrecognized"] += 1; continue
+                if role is None and isinstance(player_id, int):
+                    role = next((r for r, pid in ROLE_PLAYER_IDS.items() if pid == player_id), None)
+                fields = {"controlled_player_id": player_id, "observed_action": action,
+                          "telemetry_record": deepcopy(record)}
+                if payload is None:
+                    fields["notes"] = f"Imported telemetry record {line_number}" + (f": {status}" if status is not None else "")
+                try:
+                    row = self.observe(match_id, role, "unknown", "medium", payload, **fields)
+                except ValueError:
+                    counts["ignored_unrecognized"] += 1; continue
+                key = "full_state_observations" if row["observation_type"] == "full_state" else "partial_observations"
+                counts[key] += 1
+        return counts
 
     def promote(self, observation_id):
         observation = self._read("observations", observation_id)
