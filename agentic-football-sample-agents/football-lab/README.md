@@ -253,3 +253,78 @@ Optional comma-separated filters are `--possession`, `--score`, `--time`, `--bal
 exceptions, normalization, tactical action rates, and paired deltas for each role/scenario-family.
 `large_changes` uses `--highlight-threshold` (20 percentage points or milliseconds by default) to
 draw attention to magnitude; it never labels a change good or bad.
+
+## Week 2 official-match observation loop (offline)
+
+Official matches are scarce, high-value experiments. Record the one to five decisive situations
+that can inform a tactical review rather than cataloguing every tick. The `week2.py` workflow is
+fully local: it reads and writes JSON/Markdown and uses deterministic geometry, with no AWS
+credentials, Bedrock, AgentCore, Kiro, Event Code, or network connection. It does not simulate play,
+score decisions, predict alternative outcomes, deploy changes, or claim that a candidate will win.
+
+```text
+OFFICIAL MATCH
+      ↓
+record 1–5 decisive observations
+      ↓
+capture full game states when available
+      ↓
+week2 report
+      ↓
+identify repeated role/problem pattern
+      ↓
+promote observations to regression cases
+      ↓
+generate narrow candidate config
+      ↓
+offline regression checks
+      ↓
+review/deploy candidate
+      ↓
+NEXT OFFICIAL MATCH
+```
+
+The default workspace is `week2/{matches,observations,regressions,reports}`. Match labels are stable
+operator-selected IDs. Observation and regression IDs are content-derived, so capturing or
+promoting identical input again produces identical output. A payload with valid `gameState.ball`
+and `gameState.players` becomes a replayable full-state observation; incomplete captures remain
+useful partial/manual observations in reports. Infrastructure observations (`throttled`, `timeout`,
+`authentication`, `access_denied`, `dependency_failure`, and `model_exception`) are reported
+separately and cannot be promoted as tactical regressions.
+
+### Complete offline example
+
+This example creates a match, records three decisive observations (one with an exact state),
+promotes the full state, writes the Markdown report, and emits a review-only Phase 3 candidate.
+The printed `observation_id` from the first command is substituted for `OBS_ID`:
+
+```bash
+python week2.py new-match --match week2-001 --opponent "Team Name" \
+  --final-score "1-1" --configuration week2-baseline --git-sha "$(git rev-parse HEAD)"
+
+python week2.py observe --match week2-001 --role fwd1 \
+  --problem missed_shooting_opportunity --severity high \
+  --notes "Passed backward from a central shooting position" \
+  --payload scenarios/forward_shooting_opportunity.json
+
+python week2.py observe --match week2-001 --role fwd1 \
+  --problem missed_shooting_opportunity --severity high \
+  --notes "Chose a lateral pass with space near the area"
+
+python week2.py observe --match week2-001 --role mid \
+  --problem unnecessary_backward_pass --severity medium \
+  --notes "Passed backward during an advancing transition"
+
+python week2.py promote --observation OBS_ID
+python week2.py report --match week2-001
+python week2.py suggest-config --match week2-001 \
+  --problem missed_shooting_opportunity \
+  --output week2/reports/week2-001-fwd1-shooting-candidate.json
+```
+
+Use `--payload -` to pipe a captured payload on standard input. `report --json` emits structured
+report data instead of Markdown, and `trends` gives descriptive per-match tactical-problem counts;
+neither makes causal claims. Promoted files contain the exact payload plus human annotations in a
+corpus-compatible `{metadata, payload}` envelope, ready for optional later replay when live model
+access is available. Candidate configs are explicitly marked `candidate` and `review_required` and
+never alter an existing tactical configuration.
