@@ -19,6 +19,9 @@ TEAMS = {
     "extremely-aggressive": "ai-team-strands-extremely-aggressive",
     "extremely-defensive": "ai-team-strands-extremely-defensive",
 }
+MODEL_IDS = {"gk": "us.amazon.nova-micro-v1:0", "def": "us.amazon.nova-lite-v1:0",
+             "mid": "us.amazon.nova-pro-v1:0", "fwd1": "us.amazon.nova-micro-v1:0",
+             "fwd2": "us.amazon.nova-lite-v1:0"}
 
 
 @dataclass
@@ -75,6 +78,22 @@ def load_agent(team: str, role: str, root: Path | None = None):
         raise RuntimeError(f"Could not load stock agent from {module_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def load_configured_agent(config, role: str, root: Path | None = None):
+    """Load a stock role and, only when requested, replace its model-facing prompt.
+
+    The module, model ID, state summarizer, stock parser, command schema, and invocation
+    path remain the same. An empty configuration returns the untouched stock module.
+    """
+    from tactical_config import tactical_addendum
+
+    module = load_agent(config.team, role, root)
+    addendum = tactical_addendum(config, role)
+    if addendum:
+        from agent_base import create_agent
+        module.agent = create_agent(module.SYSTEM_PROMPT + addendum, model_id=MODEL_IDS[role])
     return module
 
 

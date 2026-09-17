@@ -53,12 +53,43 @@ def compare_decisions(left, right):
     def tactical(rows):
         return {f"{name.lower()}_rate_pct": _rate(rows, lambda row, name=name: row.get("action_type") == name)
                 for name in ("PASS", "SHOOT", "MOVE_TO", "PRESS_BALL", "INTERCEPT")}
+    left_rows, right_rows = [a for a, _ in pairs], [b for _, b in pairs]
+    left_summary, right_summary = summarize(left_rows), summarize(right_rows)
+    deltas = {}
+    for key in ("valid_post_parser_pct", "strict_raw_json_pct", "tolerant_recovery_pct",
+                "normalization_pct", "exception_pct", "exceeds_500ms_pct"):
+        deltas[key] = round(right_summary[key] - left_summary[key], 3)
+    deltas["decision_latency_p50_ms"] = _numeric_delta(
+        left_summary["decision_latency_ms"]["p50"], right_summary["decision_latency_ms"]["p50"])
+    deltas["model_latency_p50_ms"] = _numeric_delta(
+        left_summary["model_latency_ms"]["p50"], right_summary["model_latency_ms"]["p50"])
+    left_tactical = {**tactical(left_rows),
+                     "aggressive_action_rate_pct": _rate(pairs, lambda p: p[0].get("action_type") in AGGRESSIVE_ACTIONS),
+                     "defensive_action_rate_pct": _rate(pairs, lambda p: p[0].get("action_type") in DEFENSIVE_ACTIONS)}
+    right_tactical = {**tactical(right_rows),
+                      "aggressive_action_rate_pct": _rate(pairs, lambda p: p[1].get("action_type") in AGGRESSIVE_ACTIONS),
+                      "defensive_action_rate_pct": _rate(pairs, lambda p: p[1].get("action_type") in DEFENSIVE_ACTIONS)}
+    deltas["tactical_rate_pct"] = {key: round(right_tactical[key] - value, 3)
+                                    for key, value in left_tactical.items()}
+    commands = set(left_summary["action_distribution"]) | set(right_summary["action_distribution"])
+    deltas["command_count"] = {command: right_summary["action_distribution"].get(command, 0) -
+                                left_summary["action_distribution"].get(command, 0)
+                                for command in sorted(commands)}
     return {"matched_decisions": len(pairs), "same_action_type_pct": same,
             "different_action_type_pct": round(100 - same, 3) if pairs else 0.0,
-            "left": {**tactical([a for a, _ in pairs]),
-                     "aggressive_action_rate_pct": _rate(pairs, lambda p: p[0].get("action_type") in AGGRESSIVE_ACTIONS),
-                     "defensive_action_rate_pct": _rate(pairs, lambda p: p[0].get("action_type") in DEFENSIVE_ACTIONS)},
-            "right": {**tactical([b for _, b in pairs]),
-                      "aggressive_action_rate_pct": _rate(pairs, lambda p: p[1].get("action_type") in AGGRESSIVE_ACTIONS),
-                      "defensive_action_rate_pct": _rate(pairs, lambda p: p[1].get("action_type") in DEFENSIVE_ACTIONS)}}
+            "left_summary": left_summary, "right_summary": right_summary, "deltas": deltas,
+            "left": left_tactical, "right": right_tactical}
 
+
+def _numeric_delta(left, right):
+    return None if left is None or right is None else round(right - left, 3)
+
+
+def grouped_comparisons(left, right):
+    """Paired metrics for each role/scenario-family intersection."""
+    groups = {}
+    keys = {(row.get("role"), row.get("scenario_metadata", {}).get("scenario_family")) for row in left + right}
+    for role, family in sorted(keys):
+        select = lambda rows: [row for row in rows if row.get("role") == role and row.get("scenario_metadata", {}).get("scenario_family") == family]
+        groups[f"{role}:{family}"] = compare_decisions(select(left), select(right))
+    return groups

@@ -1,9 +1,10 @@
 # Agentic Football local benchmarking lab
 
 The lab runs independent, deterministic decision states through unchanged stock agents. Phase 2
-adds corpus generation, repeatable benchmarking, SQLite experiments, paired tactical comparison,
-and Markdown reports while preserving the Phase 1 single-scenario API. It deliberately does not
-implement game physics, ticks, matches, prompt optimization, or deployment.
+adds corpus generation, repeatable benchmarking, SQLite experiments, and paired tactical comparison.
+Phase 3 adds external, named tactical configurations and an all-role regression workflow while
+preserving every Phase 1/2 command. It deliberately does not implement game physics, ticks, matches,
+a universal football-quality score, or deployment.
 
 The architecture is intentionally one-way:
 
@@ -185,3 +186,37 @@ AWS credentials and Bedrock model access.
   time but does not terminate an in-flight SDK call; configure botocore/model timeouts externally.
 - The adapter follows the stock handler's successful model path but deliberately reports model
   exceptions rather than activating rule-based fallbacks, making failures visible to experiments.
+
+## Rapid Week 2 tuning (Phase 3)
+
+Named JSON configurations live in `configs/`. A configuration has `global.instructions` and
+`global.parameters`, plus independently merged overrides for `gk`, `def`, `mid`, `fwd1`, and
+`fwd2`. Settings become a clearly separated lab-only prompt addendum. The adapter retains the stock
+role module, model ID, state summary, parser, command schema, and invocation. An empty configuration
+uses the original model object and prompt path without rebuilding either one. No deployed agent file
+is changed.
+
+`week2-baseline` is intentionally empty and represents the current balanced agents. The
+`forward-shooting` and `defensive-pressure` examples isolate a forward preference and defender
+pressure change respectively; they are hypotheses, not claims of improvement.
+
+Generate one immutable deterministic corpus for all five roles, then run baseline and candidates
+through identical scenarios and persist every role benchmark in the existing SQLite store:
+
+```bash
+python regression.py \
+  --baseline week2-baseline \
+  --candidate forward-shooting \
+  --candidate defensive-pressure \
+  --generate generated/week2-seed42.jsonl \
+  --count 25 --seed 42 --scenario-set all \
+  --database results/football_lab.sqlite \
+  --output results/week2-regression.json
+```
+
+Reuse the exact corpus with `--corpus generated/week2-seed42.jsonl` instead of `--generate`.
+Optional comma-separated filters are `--possession`, `--score`, `--time`, `--ball-zone`, and
+`--pressure`. The report includes command distributions, decision/model latency, parser validity,
+exceptions, normalization, tactical action rates, and paired deltas for each role/scenario-family.
+`large_changes` uses `--highlight-threshold` (20 percentage points or milliseconds by default) to
+draw attention to magnitude; it never labels a change good or bad.

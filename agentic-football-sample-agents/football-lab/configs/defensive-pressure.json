@@ -1,0 +1,8 @@
+{
+  "name": "defensive-pressure",
+  "team": "balanced",
+  "global": {"instructions": [], "parameters": {}},
+  "roles": {
+    "def": {"instructions": ["Apply earlier pressure to an opponent carrying the ball in your defensive half."], "parameters": {"preferred_press_intensity": 0.8}}
+  }
+}

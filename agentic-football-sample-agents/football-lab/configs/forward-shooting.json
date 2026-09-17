@@ -1,0 +1,9 @@
+{
+  "name": "forward-shooting",
+  "team": "balanced",
+  "global": {"instructions": [], "parameters": {}},
+  "roles": {
+    "fwd1": {"instructions": ["Prefer SHOOT over PASS when you have a clear sight of goal."], "parameters": {"shooting_range_units": 30}},
+    "fwd2": {"instructions": ["Prefer SHOOT over PASS when you have a clear sight of goal."], "parameters": {"shooting_range_units": 30}}
+  }
+}
