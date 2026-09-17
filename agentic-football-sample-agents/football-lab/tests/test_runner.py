@@ -9,7 +9,8 @@ import pytest
 LAB = Path(__file__).parents[1]
 sys.path.insert(0, str(LAB / "src"))
 sys.path.insert(0, str(LAB.parents[0] / "lib"))
-from adapters import AgentCall, invoke_stock_agent, load_agent
+from adapters import (AgentCall, ModelTimeouts, _replace_agent_model, invoke_stock_agent,
+                      load_agent, resolve_model_timeouts)
 from runner import LocalAgent, ScenarioError, load_scenario, run
 from validation import validate_commands
 
@@ -150,7 +151,7 @@ def test_status_callback_reports_stages_in_order_and_is_optional():
                  invoker=lambda *_: call(), status_callback=statuses.append)
     assert result.valid_action
     assert statuses == ["starting balanced:mid", "loading agent", "loading scenario",
-                        "invoking model", "validating response", "complete"]
+                        "invoking model (read timeout: 30s)", "validating response", "complete"]
     assert run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
                invoker=lambda *_: call()).valid_action
 
@@ -167,12 +168,70 @@ def test_failure_status_preserves_structured_exception():
     assert result.exception == "RuntimeError: model unavailable"
 
 
+def test_timeout_defaults_environment_and_cli_precedence():
+    assert resolve_model_timeouts(environ={}) == ModelTimeouts(5, 30, 1)
+    env = {"FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS": "7.5",
+           "FOOTBALL_LAB_READ_TIMEOUT_SECONDS": "44",
+           "FOOTBALL_LAB_MAX_ATTEMPTS": "3"}
+    assert resolve_model_timeouts(environ=env) == ModelTimeouts(7.5, 44, 3)
+    assert resolve_model_timeouts(connect_timeout=2, read_timeout=9, max_attempts=1,
+                                  environ=env) == ModelTimeouts(2, 9, 1)
+
+
+@pytest.mark.parametrize("environment", [
+    {"FOOTBALL_LAB_READ_TIMEOUT_SECONDS": "nope"},
+    {"FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS": "0"},
+    {"FOOTBALL_LAB_MAX_ATTEMPTS": "0"},
+    {"FOOTBALL_LAB_MAX_ATTEMPTS": "1.5"},
+])
+def test_invalid_timeout_environment_is_rejected(environment):
+    with pytest.raises(ValueError):
+        resolve_model_timeouts(environ=environment)
+
+
+def test_bedrock_model_receives_botocore_timeout_config(monkeypatch):
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("strands.models.BedrockModel", FakeModel)
+    monkeypatch.setattr("strands.Agent", lambda **kwargs: SimpleNamespace(**kwargs))
+    stock = SimpleNamespace(SYSTEM_PROMPT="stock prompt")
+    _replace_agent_model(stock, "mid", ModelTimeouts(4, 19, 2))
+    config = captured["boto_client_config"]
+    assert captured["model_id"] == "us.amazon.nova-pro-v1:0"
+    assert config.connect_timeout == 4
+    assert config.read_timeout == 19
+    assert config.retries == {"total_max_attempts": 2, "mode": "standard"}
+    assert stock.agent.system_prompt == "stock prompt"
+
+
+def test_sdk_timeout_sets_structured_timeout_result():
+    from botocore.exceptions import ReadTimeoutError
+
+    statuses = []
+
+    def fail(*_args):
+        raise ReadTimeoutError(endpoint_url="https://bedrock.example")
+
+    result = run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
+                 invoker=fail, status_callback=statuses.append, read_timeout=12)
+    assert statuses[-2:] == ["invoking model (read timeout: 12s)",
+                            "failed: ReadTimeoutError"]
+    assert result.timed_out is True
+    assert result.action is None
+    assert result.post_parser_valid is False
+    assert result.exception.startswith("ReadTimeoutError:")
+
+
 def test_cli_json_progress_and_quiet(monkeypatch, capsys):
     spec = importlib.util.spec_from_file_location("run_scenario_cli", LAB / "run_scenario.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
 
-    def fake_run(team, role, scenario, *, status_callback=None):
+    def fake_run(team, role, scenario, *, status_callback=None, **_timeouts):
         if status_callback:
             status_callback(f"starting {team}:{role}")
             status_callback("complete")

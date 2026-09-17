@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from runner import format_text, run
+from adapters import resolve_model_timeouts
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,13 +15,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--quiet", action="store_true", help="suppress progress messages")
+    parser.add_argument("--connect-timeout", type=float, metavar="SECONDS",
+                        help="Bedrock connection timeout (environment/default when omitted)")
+    parser.add_argument("--read-timeout", type=float, metavar="SECONDS",
+                        help="Bedrock response read timeout (environment/default when omitted)")
+    parser.add_argument("--max-attempts", type=int, metavar="N",
+                        help="total Bedrock request attempts (environment/default when omitted)")
     args = parser.parse_args(argv)
+
+    try:
+        timeouts = resolve_model_timeouts(connect_timeout=args.connect_timeout,
+                                          read_timeout=args.read_timeout,
+                                          max_attempts=args.max_attempts)
+    except ValueError as error:
+        parser.error(str(error))
 
     def report_status(message: str) -> None:
         print(f"[football-lab] {message}", file=sys.stderr, flush=True)
 
     result = run(args.team, args.agent, args.scenario,
-                 status_callback=None if args.quiet else report_status)
+                 status_callback=None if args.quiet else report_status,
+                 connect_timeout=timeouts.connect_timeout,
+                 read_timeout=timeouts.read_timeout,
+                 max_attempts=timeouts.max_attempts)
     print(result.to_json() if args.as_json else format_text(result))
     return 0 if result.valid_action and result.exception is None else 1
 
