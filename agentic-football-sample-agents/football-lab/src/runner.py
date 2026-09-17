@@ -12,6 +12,13 @@ from adapters import invoke_stock_agent, load_agent
 from validation import Validation, validate_commands, validate_scenario
 
 
+StatusCallback = Callable[[str], None]
+
+
+def _no_status(_message: str) -> None:
+    """Default status sink used by programmatic callers."""
+
+
 class ScenarioError(ValueError):
     pass
 
@@ -75,11 +82,14 @@ class LocalAgent:
     """A reusable, already-loaded stock role for repeated local decisions."""
 
     def __init__(self, team: str, role: str, *, loader=load_agent,
-                 invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter):
+                 invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter,
+                 status_callback: StatusCallback | None = None):
         self.team = team.lower()
         self.role = role.lower()
         self._clock = clock
         self._invoker = invoker
+        self._status = status_callback or _no_status
+        self._status("loading agent")
         started = clock()
         self.module = loader(self.team, self.role)
         self.cold_start_ms = (clock() - started) * 1000
@@ -90,16 +100,19 @@ class LocalAgent:
         total_started = self._clock()
         name = scenario_name or (Path(scenario).stem if not isinstance(scenario, dict) else "scenario")
         try:
+            self._status("loading scenario")
             payload = load_scenario(scenario) if not isinstance(scenario, dict) else scenario
             if isinstance(scenario, dict):
                 _validate_scenario_or_raise(payload)
                 name = scenario_name or payload.get("name", "scenario")
+            self._status("invoking model")
             call = self._invoker(self.module, payload, self._clock)
+            self._status("validating response")
             validation_started = self._clock()
             validation = validate_commands(call.commands)
             validation_ms = (self._clock() - validation_started) * 1000
             total_ms = (self._clock() - total_started) * 1000
-            return RunResult(
+            result = RunResult(
                 team=self.team, agent=self.module.POSITION_LABEL, player_id=self.player_id,
                 scenario=name, action=call.commands, post_parser_valid=validation.valid,
                 action_type=validation.action_type, details=validation.details,
@@ -112,22 +125,30 @@ class LocalAgent:
                 validation_latency_ms=validation_ms,
                 exceeds_500ms=call.decision_latency_ms > 500,
             )
+            self._status("complete")
+            return result
         except Exception as exception:  # result contract intentionally reports local/AWS failures
+            self._status(f"failed: {type(exception).__name__}")
             total_ms = (self._clock() - total_started) * 1000
             return _error_result(self.team, self.role, self.player_id, name, total_ms,
                                  self.cold_start_ms, exception)
 
 
 def run(team: str, role: str, scenario_path: str | Path, *, loader=load_agent,
-        invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter) -> RunResult:
+        invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter,
+        status_callback: StatusCallback | None = None) -> RunResult:
     """Cold single-scenario convenience API used by the CLI."""
+    status = status_callback or _no_status
+    status(f"starting {team}:{role}")
     total_started = clock()
     try:
-        agent = LocalAgent(team, role, loader=loader, invoker=invoker, clock=clock)
+        agent = LocalAgent(team, role, loader=loader, invoker=invoker, clock=clock,
+                           status_callback=status)
         result = agent.run(scenario_path)
         result.total_latency_ms = (clock() - total_started) * 1000
         return result
     except Exception as exception:
+        status(f"failed: {type(exception).__name__}")
         total_ms = (clock() - total_started) * 1000
         return _error_result(team, role, None, Path(scenario_path).stem, total_ms, 0.0, exception)
 
