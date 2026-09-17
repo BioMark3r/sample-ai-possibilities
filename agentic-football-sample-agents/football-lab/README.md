@@ -185,3 +185,61 @@ AWS credentials and Bedrock model access.
   time but does not terminate an in-flight SDK call; configure botocore/model timeouts externally.
 - The adapter follows the stock handler's successful model path but deliberately reports model
   exceptions rather than activating rule-based fallbacks, making failures visible to experiments.
+
+## Week 2 live-match regression workflow
+
+The deliberately narrow operational loop is:
+
+```text
+official match
+  -> identify 1–5 decisive decisions
+  -> capture/reconstruct each game state
+  -> import observation
+  -> inspect offline
+  -> replay locally when model access is available
+  -> keep the scenario as a permanent regression for future tactical changes
+```
+
+Start from any existing LocalAgent-compatible payload (including copied/reconstructed log JSON) to
+avoid hand-authoring a corpus row:
+
+```bash
+python new_observation.py --scenario scenarios/basic_possession.json \
+  --output observations/week2-match-001.json --observation-id week2-match-001-decision-1 \
+  --match "Week 2 official match 001" --role mid --controlled-player-id 2
+```
+
+Edit the generated observation's expected behavior, notes, observed behavior, timestamps, score, and
+embedded payload. The observation format requires `observation_id`, `match_id` or `match_label`,
+`role`, `controlled_player_id`, `expected_behavior`, and a `gameState` field containing the complete
+existing LocalAgent payload (`teamId`, `myPlayers`, and its nested `gameState`). It optionally accepts
+`observed_at`, top-level `gameTime`, `score`, `observed_behavior`, `notes`, and string `tags`.
+
+Validate and import it as an immutable, digest-addressed regression:
+
+```bash
+python import_observation.py --input observations/week2-match-001.json --output regression/week2/
+python inspect_regression.py --scenario regression/week2/<generated-id>.json
+```
+
+The imported file keeps human provenance and behavioral notes in `metadata`, separate from the exact
+machine `payload`. Its ID is deterministic for the complete observation; the importer validates both
+layers and will not overwrite a different existing regression. Inspection calculates possession,
+score state, field zone, nearby players, pressure, and goal distance entirely offline—no SDK,
+credentials, model call, or deployed service is involved.
+
+Check the environment before attempting a live replay:
+
+```bash
+python preflight.py
+python replay_observation.py --scenario regression/week2/<generated-id>.json --team balanced
+```
+
+Preflight prints `OFFLINE READY`, `LIVE MODEL READY`, or `BLOCKED`, followed by individual runtime,
+dependency, generation, offline-tooling, credential, identity, region, and live-readiness fields. It
+uses only the non-destructive STS identity lookup and intentionally does not issue a paid Bedrock
+model call; invocation capability is therefore labelled as not checked and live readiness remains false. The result
+stays `OFFLINE READY` until invocation capability is positively established; having SDK credentials,
+an identity, and a region alone is not presented as proof of model entitlement. Replay uses the existing `LocalAgent` and unchanged stock parser/source. Any agent,
+AWS, timeout, entitlement, or Bedrock error is explicitly reported as infrastructure failure with a
+nonzero exit status; it is never recorded as a tactical decision and never changes the regression.
