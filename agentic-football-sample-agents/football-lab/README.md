@@ -46,26 +46,38 @@ Add `--json` for machine-readable output. Available agents are `gk`, `def`, `mid
 forward shooting opportunity. Their envelope is the stock handler's inner prompt object:
 `teamId`, `myPlayers`, and `gameState`.
 
-Live local calls use a 5-second connection timeout, a 30-second response-read timeout, and one
-total request attempt by default. Override these with `--connect-timeout`, `--read-timeout`, and
-`--max-attempts`, or with `FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS`,
-`FOOTBALL_LAB_READ_TIMEOUT_SECONDS`, and `FOOTBALL_LAB_MAX_ATTEMPTS`. CLI values take precedence
+Live local calls use a 5-second connection timeout, a 30-second response-read timeout, a 30-second
+model deadline, and one total request attempt by default. The **connect timeout** limits opening an
+individual SDK connection; the **read timeout** limits an individual SDK response read; and the
+**model deadline** is the outer wall-clock bound around the complete synchronous model invocation,
+independent of SDK retries and transport timeouts. Override these with `--connect-timeout`,
+`--read-timeout`, `--model-deadline`, and `--max-attempts`, or with
+`FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS`, `FOOTBALL_LAB_READ_TIMEOUT_SECONDS`,
+`FOOTBALL_LAB_MODEL_DEADLINE_SECONDS`, and `FOOTBALL_LAB_MAX_ATTEMPTS`. CLI values take precedence
 over environment values, which take precedence over the defaults. Values must be positive, and
 max attempts must be an integer of at least one.
 
 For example, a fast-failing Week 2 debugging run is:
 
 ```bash
-AWS_DEFAULT_REGION=us-east-1 python run_scenario.py \
-  --team balanced --agent mid \
+AWS_DEFAULT_REGION=us-east-1 \
+python run_scenario.py \
+  --team balanced \
+  --agent mid \
   --scenario scenarios/basic_possession.json \
-  --read-timeout 20 --connect-timeout 5 --max-attempts 1 --json
+  --connect-timeout 5 \
+  --read-timeout 20 \
+  --max-attempts 1 \
+  --model-deadline 30 \
+  --json
 ```
 
-The progress line reports the effective read timeout. SDK timeout exceptions remain infrastructure
-failures: the structured result has `timed_out: true`, a null action, invalid status, and the real
-exception type/message. These Botocore settings apply only to local-lab model calls; they do not
-change the deployed AgentCore runtime or any stock agent source.
+The progress line reports both effective timeouts. SDK and hard-deadline exceptions remain
+infrastructure failures: the structured result has `timed_out: true`, `infrastructure_status:
+"timeout"`, a null action, invalid status, and the real exception type/message. Throttling,
+authentication, access, availability, and dependency failures receive their own infrastructure
+status rather than being treated as tactical failures. These settings apply only to local-lab model
+calls; they do not change the deployed AgentCore runtime or any stock agent source.
 
 Exit status is zero only for a post-parser valid action without an exception. Results separate:
 

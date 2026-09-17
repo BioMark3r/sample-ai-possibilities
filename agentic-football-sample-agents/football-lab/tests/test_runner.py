@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import signal
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,8 +11,8 @@ import pytest
 LAB = Path(__file__).parents[1]
 sys.path.insert(0, str(LAB / "src"))
 sys.path.insert(0, str(LAB.parents[0] / "lib"))
-from adapters import (AgentCall, ModelTimeouts, _replace_agent_model, invoke_stock_agent,
-                      load_agent, resolve_model_timeouts)
+from adapters import (AgentCall, ModelDeadlineExceeded, ModelTimeouts, _replace_agent_model,
+                      invoke_stock_agent, load_agent, model_deadline, resolve_model_timeouts)
 from runner import LocalAgent, ScenarioError, load_scenario, run
 from validation import validate_commands
 
@@ -151,7 +153,8 @@ def test_status_callback_reports_stages_in_order_and_is_optional():
                  invoker=lambda *_: call(), status_callback=statuses.append)
     assert result.valid_action
     assert statuses == ["starting balanced:mid", "loading agent", "loading scenario",
-                        "invoking model (read timeout: 30s)", "validating response", "complete"]
+                        "invoking model (read timeout: 30s, model deadline: 30s)",
+                        "validating response", "complete"]
     assert run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
                invoker=lambda *_: call()).valid_action
 
@@ -172,10 +175,11 @@ def test_timeout_defaults_environment_and_cli_precedence():
     assert resolve_model_timeouts(environ={}) == ModelTimeouts(5, 30, 1)
     env = {"FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS": "7.5",
            "FOOTBALL_LAB_READ_TIMEOUT_SECONDS": "44",
-           "FOOTBALL_LAB_MAX_ATTEMPTS": "3"}
-    assert resolve_model_timeouts(environ=env) == ModelTimeouts(7.5, 44, 3)
+           "FOOTBALL_LAB_MAX_ATTEMPTS": "3",
+           "FOOTBALL_LAB_MODEL_DEADLINE_SECONDS": "18"}
+    assert resolve_model_timeouts(environ=env) == ModelTimeouts(7.5, 44, 3, 18)
     assert resolve_model_timeouts(connect_timeout=2, read_timeout=9, max_attempts=1,
-                                  environ=env) == ModelTimeouts(2, 9, 1)
+                                  model_deadline=6, environ=env) == ModelTimeouts(2, 9, 1, 6)
 
 
 @pytest.mark.parametrize("environment", [
@@ -183,6 +187,7 @@ def test_timeout_defaults_environment_and_cli_precedence():
     {"FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS": "0"},
     {"FOOTBALL_LAB_MAX_ATTEMPTS": "0"},
     {"FOOTBALL_LAB_MAX_ATTEMPTS": "1.5"},
+    {"FOOTBALL_LAB_MODEL_DEADLINE_SECONDS": "0"},
 ])
 def test_invalid_timeout_environment_is_rejected(environment):
     with pytest.raises(ValueError):
@@ -218,12 +223,57 @@ def test_sdk_timeout_sets_structured_timeout_result():
 
     result = run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
                  invoker=fail, status_callback=statuses.append, read_timeout=12)
-    assert statuses[-2:] == ["invoking model (read timeout: 12s)",
+    assert statuses[-2:] == ["invoking model (read timeout: 12s, model deadline: 30s)",
                             "failed: ReadTimeoutError"]
     assert result.timed_out is True
     assert result.action is None
     assert result.post_parser_valid is False
     assert result.exception.startswith("ReadTimeoutError:")
+    assert result.infrastructure_status == "timeout"
+
+
+def test_signal_deadline_fires_and_restores_handler():
+    previous = signal.getsignal(signal.SIGALRM)
+    with pytest.raises(ModelDeadlineExceeded, match="0.1 seconds"):
+        with model_deadline(0.05):
+            time.sleep(1)
+    assert signal.getsignal(signal.SIGALRM) is previous
+
+
+def test_model_deadline_produces_structured_failure():
+    def slow_agent(_prompt):
+        time.sleep(1)
+
+    result = run("balanced", "mid", SCENARIO,
+                 loader=lambda *_: SimpleNamespace(MY_PLAYER_ID=2, POSITION_LABEL="MID",
+                                                   agent=slow_agent),
+                 invoker=invoke_stock_agent, model_deadline=0.05)
+    assert result.timed_out is True
+    assert result.infrastructure_status == "timeout"
+    assert result.exception == "ModelDeadlineExceeded: model invocation exceeded 0.1 seconds"
+    assert result.action is None and result.post_parser_valid is False
+    assert result.model_latency_ms is None and result.parsing_latency_ms is None
+
+
+@pytest.mark.parametrize(("exception", "status"), [
+    (RuntimeError("ModelThrottledException: Too many tokens per day"), "throttled"),
+    (RuntimeError("AccessDeniedException: access denied"), "access_denied"),
+    (ModuleNotFoundError("No module named 'strands'"), "dependency_error"),
+])
+def test_infrastructure_failure_classification(exception, status):
+    def fail(*_args):
+        raise exception
+
+    result = run("balanced", "mid", SCENARIO, loader=lambda *_: module(), invoker=fail)
+    assert result.infrastructure_status == status
+    assert result.action is None and result.post_parser_valid is False
+    assert result.parser_normalization == {}
+
+
+def test_successful_invocation_has_ok_infrastructure_status():
+    result = run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
+                 invoker=lambda *_: call())
+    assert result.infrastructure_status == "ok"
 
 
 def test_cli_json_progress_and_quiet(monkeypatch, capsys):
