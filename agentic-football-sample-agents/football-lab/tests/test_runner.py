@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -141,3 +142,50 @@ def test_cold_run_serialization_includes_new_fields():
     for field in ("total_latency_ms", "cold_start_ms", "decision_latency_ms",
                   "model_latency_ms", "parsing_latency_ms", "validation_latency_ms"):
         assert field in data
+
+
+def test_status_callback_reports_stages_in_order_and_is_optional():
+    statuses = []
+    result = run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
+                 invoker=lambda *_: call(), status_callback=statuses.append)
+    assert result.valid_action
+    assert statuses == ["starting balanced:mid", "loading agent", "loading scenario",
+                        "invoking model", "validating response", "complete"]
+    assert run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
+               invoker=lambda *_: call()).valid_action
+
+
+def test_failure_status_preserves_structured_exception():
+    statuses = []
+
+    def fail(*_args):
+        raise RuntimeError("model unavailable")
+
+    result = run("balanced", "mid", SCENARIO, loader=lambda *_: module(),
+                 invoker=fail, status_callback=statuses.append)
+    assert statuses[-1] == "failed: RuntimeError"
+    assert result.exception == "RuntimeError: model unavailable"
+
+
+def test_cli_json_progress_and_quiet(monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("run_scenario_cli", LAB / "run_scenario.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+
+    def fake_run(team, role, scenario, *, status_callback=None):
+        if status_callback:
+            status_callback(f"starting {team}:{role}")
+            status_callback("complete")
+        return run(team, role, scenario, loader=lambda *_: module(), invoker=lambda *_: call())
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    arguments = ["--agent", "mid", "--scenario", str(SCENARIO), "--json"]
+    assert cli.main(arguments) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["valid_action"] is True
+    assert "[football-lab] starting balanced:mid" in captured.err
+
+    assert cli.main([*arguments, "--quiet"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["valid_action"] is True
+    assert captured.err == ""
