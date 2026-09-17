@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -22,6 +23,56 @@ TEAMS = {
 MODEL_IDS = {"gk": "us.amazon.nova-micro-v1:0", "def": "us.amazon.nova-lite-v1:0",
              "mid": "us.amazon.nova-pro-v1:0", "fwd1": "us.amazon.nova-micro-v1:0",
              "fwd2": "us.amazon.nova-lite-v1:0"}
+
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_READ_TIMEOUT_SECONDS = 30.0
+DEFAULT_MAX_ATTEMPTS = 1
+
+
+@dataclass(frozen=True)
+class ModelTimeouts:
+    """Effective local Bedrock transport settings."""
+
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+
+
+def resolve_model_timeouts(*, connect_timeout: float | None = None,
+                           read_timeout: float | None = None,
+                           max_attempts: int | None = None,
+                           environ: dict[str, str] | None = None) -> ModelTimeouts:
+    """Resolve CLI-style overrides over environment values and local defaults."""
+    env = os.environ if environ is None else environ
+
+    def timeout_value(explicit, name, default):
+        raw = explicit if explicit is not None else env.get(name, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must be a number greater than 0 (got {raw!r})") from error
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be greater than 0 (got {raw!r})")
+        return value
+
+    raw_attempts = max_attempts if max_attempts is not None else env.get(
+        "FOOTBALL_LAB_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS)
+    try:
+        attempts = int(raw_attempts)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"FOOTBALL_LAB_MAX_ATTEMPTS must be an integer of at least 1 (got {raw_attempts!r})"
+        ) from error
+    if attempts < 1:
+        raise ValueError(
+            f"FOOTBALL_LAB_MAX_ATTEMPTS must be at least 1 (got {raw_attempts!r})")
+    return ModelTimeouts(
+        timeout_value(connect_timeout, "FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS",
+                      DEFAULT_CONNECT_TIMEOUT_SECONDS),
+        timeout_value(read_timeout, "FOOTBALL_LAB_READ_TIMEOUT_SECONDS",
+                      DEFAULT_READ_TIMEOUT_SECONDS),
+        attempts,
+    )
 
 
 @dataclass
@@ -59,7 +110,8 @@ def _stub_agentcore() -> None:
     sys.modules["bedrock_agentcore.runtime"] = runtime
 
 
-def load_agent(team: str, role: str, root: Path | None = None):
+def load_agent(team: str, role: str, root: Path | None = None,
+               model_timeouts: ModelTimeouts | None = None):
     """Import and return one unmodified stock agent module."""
     team = team.lower()
     role = role.lower()
@@ -78,10 +130,28 @@ def load_agent(team: str, role: str, root: Path | None = None):
         raise RuntimeError(f"Could not load stock agent from {module_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    _replace_agent_model(module, role, model_timeouts or resolve_model_timeouts())
     return module
 
 
-def load_configured_agent(config, role: str, root: Path | None = None):
+def _replace_agent_model(module, role: str, model_timeouts: ModelTimeouts,
+                         system_prompt: str | None = None) -> None:
+    """Apply lab-only Botocore settings without changing a stock source module."""
+    from botocore.config import Config
+    from strands import Agent
+    from strands.models import BedrockModel
+
+    client_config = Config(
+        connect_timeout=model_timeouts.connect_timeout,
+        read_timeout=model_timeouts.read_timeout,
+        retries={"total_max_attempts": model_timeouts.max_attempts, "mode": "standard"},
+    )
+    model = BedrockModel(model_id=MODEL_IDS[role], boto_client_config=client_config)
+    module.agent = Agent(model=model, system_prompt=system_prompt or module.SYSTEM_PROMPT)
+
+
+def load_configured_agent(config, role: str, root: Path | None = None,
+                          model_timeouts: ModelTimeouts | None = None):
     """Load a stock role and, only when requested, replace its model-facing prompt.
 
     The module, model ID, state summarizer, stock parser, command schema, and invocation
@@ -89,11 +159,11 @@ def load_configured_agent(config, role: str, root: Path | None = None):
     """
     from tactical_config import tactical_addendum
 
-    module = load_agent(config.team, role, root)
+    timeouts = model_timeouts or resolve_model_timeouts()
+    module = load_agent(config.team, role, root, timeouts)
     addendum = tactical_addendum(config, role)
     if addendum:
-        from agent_base import create_agent
-        module.agent = create_agent(module.SYSTEM_PROMPT + addendum, model_id=MODEL_IDS[role])
+        _replace_agent_model(module, role, timeouts, module.SYSTEM_PROMPT + addendum)
     return module
 
 

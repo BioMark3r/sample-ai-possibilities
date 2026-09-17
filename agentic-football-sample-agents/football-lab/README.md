@@ -46,6 +46,27 @@ Add `--json` for machine-readable output. Available agents are `gk`, `def`, `mid
 forward shooting opportunity. Their envelope is the stock handler's inner prompt object:
 `teamId`, `myPlayers`, and `gameState`.
 
+Live local calls use a 5-second connection timeout, a 30-second response-read timeout, and one
+total request attempt by default. Override these with `--connect-timeout`, `--read-timeout`, and
+`--max-attempts`, or with `FOOTBALL_LAB_CONNECT_TIMEOUT_SECONDS`,
+`FOOTBALL_LAB_READ_TIMEOUT_SECONDS`, and `FOOTBALL_LAB_MAX_ATTEMPTS`. CLI values take precedence
+over environment values, which take precedence over the defaults. Values must be positive, and
+max attempts must be an integer of at least one.
+
+For example, a fast-failing Week 2 debugging run is:
+
+```bash
+AWS_DEFAULT_REGION=us-east-1 python run_scenario.py \
+  --team balanced --agent mid \
+  --scenario scenarios/basic_possession.json \
+  --read-timeout 20 --connect-timeout 5 --max-attempts 1 --json
+```
+
+The progress line reports the effective read timeout. SDK timeout exceptions remain infrastructure
+failures: the structured result has `timed_out: true`, a null action, invalid status, and the real
+exception type/message. These Botocore settings apply only to local-lab model calls; they do not
+change the deployed AgentCore runtime or any stock agent source.
+
 Exit status is zero only for a post-parser valid action without an exception. Results separate:
 
 - `total_latency_ms`: the entire CLI-style run, including scenario loading and cold initialization;
@@ -182,8 +203,8 @@ AWS credentials and Bedrock model access.
 
 - Gateway and Memory variants have extra service dependencies and are not silently degraded.
 - Scenarios are independent synthetic decision probes, not realistic physics or progression.
-- Timeouts are reported when the underlying AWS/model SDK raises one. The harness measures elapsed
-  time but does not terminate an in-flight SDK call; configure botocore/model timeouts externally.
+- Timeouts are reported when the underlying AWS/model SDK raises one. The lab configures Botocore
+  connection/read limits and minimized attempts rather than wrapping calls in worker threads.
 - The adapter follows the stock handler's successful model path but deliberately reports model
   exceptions rather than activating rule-based fallbacks, making failures visible to experiments.
 

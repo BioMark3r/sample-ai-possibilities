@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from adapters import invoke_stock_agent, load_agent
+from adapters import ModelTimeouts, invoke_stock_agent, load_agent, resolve_model_timeouts
 from validation import Validation, validate_commands, validate_scenario
 
 
@@ -83,15 +83,21 @@ class LocalAgent:
 
     def __init__(self, team: str, role: str, *, loader=load_agent,
                  invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter,
-                 status_callback: StatusCallback | None = None):
+                 status_callback: StatusCallback | None = None,
+                 model_timeouts: ModelTimeouts | None = None):
         self.team = team.lower()
         self.role = role.lower()
         self._clock = clock
         self._invoker = invoker
         self._status = status_callback or _no_status
+        self.model_timeouts = model_timeouts or resolve_model_timeouts()
         self._status("loading agent")
         started = clock()
-        self.module = loader(self.team, self.role)
+        if loader is load_agent:
+            self.module = loader(self.team, self.role, model_timeouts=self.model_timeouts)
+        else:
+            # Preserve the two-argument loader contract used by existing callers.
+            self.module = loader(self.team, self.role)
         self.cold_start_ms = (clock() - started) * 1000
         self.player_id = self.module.MY_PLAYER_ID
 
@@ -105,7 +111,8 @@ class LocalAgent:
             if isinstance(scenario, dict):
                 _validate_scenario_or_raise(payload)
                 name = scenario_name or payload.get("name", "scenario")
-            self._status("invoking model")
+            self._status(
+                f"invoking model (read timeout: {self.model_timeouts.read_timeout:g}s)")
             call = self._invoker(self.module, payload, self._clock)
             self._status("validating response")
             validation_started = self._clock()
@@ -136,14 +143,19 @@ class LocalAgent:
 
 def run(team: str, role: str, scenario_path: str | Path, *, loader=load_agent,
         invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter,
-        status_callback: StatusCallback | None = None) -> RunResult:
+        status_callback: StatusCallback | None = None,
+        connect_timeout: float | None = None, read_timeout: float | None = None,
+        max_attempts: int | None = None) -> RunResult:
     """Cold single-scenario convenience API used by the CLI."""
     status = status_callback or _no_status
     status(f"starting {team}:{role}")
     total_started = clock()
     try:
+        model_timeouts = resolve_model_timeouts(connect_timeout=connect_timeout,
+                                                read_timeout=read_timeout,
+                                                max_attempts=max_attempts)
         agent = LocalAgent(team, role, loader=loader, invoker=invoker, clock=clock,
-                           status_callback=status)
+                           status_callback=status, model_timeouts=model_timeouts)
         result = agent.run(scenario_path)
         result.total_latency_ms = (clock() - total_started) * 1000
         return result
