@@ -1,0 +1,6 @@
+{
+  "name": "week2-baseline",
+  "team": "balanced",
+  "global": {"instructions": [], "parameters": {}},
+  "roles": {"gk": {}, "def": {}, "mid": {}, "fwd1": {}, "fwd2": {}}
+}

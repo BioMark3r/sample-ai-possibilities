@@ -15,7 +15,7 @@ from scenario_generation import load_corpus
 
 
 def run_benchmark(team, role, scenarios, runs=1, *, agent_factory=LocalAgent,
-                  corpus_path=None, output=None, database=None):
+                  corpus_path=None, output=None, database=None, configuration=None):
     if runs < 1:
         raise ValueError("runs must be positive")
     corpus = load_corpus(scenarios) if isinstance(scenarios, (str, Path)) else scenarios
@@ -39,6 +39,8 @@ def run_benchmark(team, role, scenarios, runs=1, *, agent_factory=LocalAgent,
                 "role": role, "runs": runs, "corpus_path": str(corpus_path or scenarios) if isinstance(scenarios, (str, Path)) else corpus_path,
                 "corpus_sha256": hashlib.sha256(canonical.encode()).hexdigest(), "summary": summarize(decisions),
                 "decisions": decisions}
+    if configuration is not None:
+        document["configuration"] = configuration.to_dict()
     if output:
         path = Path(output); path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
