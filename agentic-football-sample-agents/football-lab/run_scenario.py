@@ -21,12 +21,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="Bedrock response read timeout (environment/default when omitted)")
     parser.add_argument("--max-attempts", type=int, metavar="N",
                         help="total Bedrock request attempts (environment/default when omitted)")
+    parser.add_argument("--model-deadline", type=float, metavar="SECONDS",
+                        help="total wall-clock model deadline (environment/default when omitted)")
     args = parser.parse_args(argv)
 
     try:
         timeouts = resolve_model_timeouts(connect_timeout=args.connect_timeout,
                                           read_timeout=args.read_timeout,
-                                          max_attempts=args.max_attempts)
+                                          max_attempts=args.max_attempts,
+                                          model_deadline=args.model_deadline)
     except ValueError as error:
         parser.error(str(error))
 
@@ -37,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
                  status_callback=None if args.quiet else report_status,
                  connect_timeout=timeouts.connect_timeout,
                  read_timeout=timeouts.read_timeout,
-                 max_attempts=timeouts.max_attempts)
+                 max_attempts=timeouts.max_attempts,
+                 model_deadline=timeouts.model_deadline)
     print(result.to_json() if args.as_json else format_text(result))
     return 0 if result.valid_action and result.exception is None else 1
 

@@ -8,8 +8,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from adapters import ModelTimeouts, invoke_stock_agent, load_agent, resolve_model_timeouts
-from validation import Validation, validate_commands, validate_scenario
+from adapters import (ModelDeadlineExceeded, ModelTimeouts, invoke_stock_agent, load_agent,
+                      resolve_model_timeouts)
+from validation import validate_commands, validate_scenario
 
 
 StatusCallback = Callable[[str], None]
@@ -47,6 +48,7 @@ class RunResult:
     exceeds_500ms: bool = False
     timed_out: bool = False
     exception: str | None = None
+    infrastructure_status: str = "ok"
 
     @property
     def valid_action(self) -> bool:
@@ -112,8 +114,14 @@ class LocalAgent:
                 _validate_scenario_or_raise(payload)
                 name = scenario_name or payload.get("name", "scenario")
             self._status(
-                f"invoking model (read timeout: {self.model_timeouts.read_timeout:g}s)")
-            call = self._invoker(self.module, payload, self._clock)
+                f"invoking model (read timeout: {self.model_timeouts.read_timeout:g}s, "
+                f"model deadline: {self.model_timeouts.model_deadline:g}s)")
+            if self._invoker is invoke_stock_agent:
+                call = self._invoker(self.module, payload, self._clock,
+                                     deadline_seconds=self.model_timeouts.model_deadline)
+            else:
+                # Preserve the three-argument test/custom invoker contract.
+                call = self._invoker(self.module, payload, self._clock)
             self._status("validating response")
             validation_started = self._clock()
             validation = validate_commands(call.commands)
@@ -145,7 +153,7 @@ def run(team: str, role: str, scenario_path: str | Path, *, loader=load_agent,
         invoker=invoke_stock_agent, clock: Callable[[], float] = time.perf_counter,
         status_callback: StatusCallback | None = None,
         connect_timeout: float | None = None, read_timeout: float | None = None,
-        max_attempts: int | None = None) -> RunResult:
+        max_attempts: int | None = None, model_deadline: float | None = None) -> RunResult:
     """Cold single-scenario convenience API used by the CLI."""
     status = status_callback or _no_status
     status(f"starting {team}:{role}")
@@ -153,7 +161,8 @@ def run(team: str, role: str, scenario_path: str | Path, *, loader=load_agent,
     try:
         model_timeouts = resolve_model_timeouts(connect_timeout=connect_timeout,
                                                 read_timeout=read_timeout,
-                                                max_attempts=max_attempts)
+                                                max_attempts=max_attempts,
+                                                model_deadline=model_deadline)
         agent = LocalAgent(team, role, loader=loader, invoker=invoker, clock=clock,
                            status_callback=status, model_timeouts=model_timeouts)
         result = agent.run(scenario_path)
@@ -166,14 +175,37 @@ def run(team: str, role: str, scenario_path: str | Path, *, loader=load_agent,
 
 
 def _error_result(team, role, player_id, scenario, total_ms, cold_ms, exception) -> RunResult:
-    validation: Validation = validate_commands(None)
     timed_out = isinstance(exception, TimeoutError) or "timeout" in type(exception).__name__.lower()
     return RunResult(
         team=team, agent=role.upper(), player_id=player_id, scenario=scenario,
-        validation_errors=validation.errors, total_latency_ms=total_ms,
+        total_latency_ms=total_ms,
         cold_start_ms=cold_ms, timed_out=timed_out,
         exception=f"{type(exception).__name__}: {exception}",
+        infrastructure_status=_classify_infrastructure(exception),
     )
+
+
+def _classify_infrastructure(exception: Exception) -> str:
+    """Map SDK/local infrastructure failures without inventing tactical metrics."""
+    text = f"{type(exception).__name__}: {exception}".lower()
+    if any(value in text for value in ("modelthrottledexception", "throttlingexception",
+                                        "too many tokens per day", "throttl")):
+        return "throttled"
+    if isinstance(exception, ModelDeadlineExceeded) or isinstance(exception, TimeoutError) or \
+            "timeout" in text or "timed out" in text:
+        return "timeout"
+    if any(value in text for value in ("accessdenied", "access denied", "unauthorizedoperation")):
+        return "access_denied"
+    if any(value in text for value in ("credential", "no credentials", "unrecognizedclient",
+                                        "invalidsignature", "expiredtoken", "authentication")):
+        return "auth_error"
+    if any(value in text for value in ("modelnotready", "model unavailable", "serviceunavailable",
+                                        "resource not found", "resourcenotfound")):
+        return "model_unavailable"
+    if isinstance(exception, (ImportError, ModuleNotFoundError)) or \
+            any(value in text for value in ("dependency", "no module named")):
+        return "dependency_error"
+    return "unknown_error"
 
 
 def format_text(result: RunResult) -> str:
@@ -193,6 +225,7 @@ def format_text(result: RunResult) -> str:
                   f"Tolerant recovery: {'YES' if result.tolerant_recovery else 'NO'}",
                   f"Post-parser valid: {'YES' if result.post_parser_valid else 'NO'}",
                   f"Parser normalization: {json.dumps(result.parser_normalization, sort_keys=True)}",
+                  f"Infrastructure status: {result.infrastructure_status}",
                   f"Timed out: {'YES' if result.timed_out else 'NO'}",
                   f"Exception: {result.exception or 'none'}"))
     return "\n".join(lines)

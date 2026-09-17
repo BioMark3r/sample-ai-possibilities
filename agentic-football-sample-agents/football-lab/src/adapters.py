@@ -6,8 +6,11 @@ import importlib.util
 import json
 import math
 import os
+import signal
 import sys
+import threading
 import types
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -27,6 +30,11 @@ MODEL_IDS = {"gk": "us.amazon.nova-micro-v1:0", "def": "us.amazon.nova-lite-v1:0
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_READ_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_ATTEMPTS = 1
+DEFAULT_MODEL_DEADLINE_SECONDS = 30.0
+
+
+class ModelDeadlineExceeded(TimeoutError):
+    """The lab's outer wall-clock limit for one model invocation expired."""
 
 
 @dataclass(frozen=True)
@@ -36,11 +44,13 @@ class ModelTimeouts:
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
     read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    model_deadline: float = DEFAULT_MODEL_DEADLINE_SECONDS
 
 
 def resolve_model_timeouts(*, connect_timeout: float | None = None,
                            read_timeout: float | None = None,
                            max_attempts: int | None = None,
+                           model_deadline: float | None = None,
                            environ: dict[str, str] | None = None) -> ModelTimeouts:
     """Resolve CLI-style overrides over environment values and local defaults."""
     env = os.environ if environ is None else environ
@@ -72,7 +82,31 @@ def resolve_model_timeouts(*, connect_timeout: float | None = None,
         timeout_value(read_timeout, "FOOTBALL_LAB_READ_TIMEOUT_SECONDS",
                       DEFAULT_READ_TIMEOUT_SECONDS),
         attempts,
+        timeout_value(model_deadline, "FOOTBALL_LAB_MODEL_DEADLINE_SECONDS",
+                      DEFAULT_MODEL_DEADLINE_SECONDS),
     )
+
+
+@contextmanager
+def model_deadline(seconds: float):
+    """Interrupt synchronous model work after ``seconds`` on supported Linux hosts."""
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        raise RuntimeError("model deadline requires SIGALRM and signal.setitimer support")
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("model deadline must run in the main thread")
+
+    def deadline_handler(_signum, _frame):
+        raise ModelDeadlineExceeded(f"model invocation exceeded {seconds:.1f} seconds")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, deadline_handler)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 @dataclass
@@ -167,7 +201,8 @@ def load_configured_agent(config, role: str, root: Path | None = None,
     return module
 
 
-def invoke_stock_agent(module, payload: dict, clock: Callable[[], float]) -> AgentCall:
+def invoke_stock_agent(module, payload: dict, clock: Callable[[], float], *,
+                       deadline_seconds: float = DEFAULT_MODEL_DEADLINE_SECONDS) -> AgentCall:
     """Run the stock model, summarizer and parser without AgentCore transport."""
     from json_tolerant import parse_json_tolerant
     from parsing import VALID_COMMANDS, parse_commands
@@ -182,7 +217,8 @@ def invoke_stock_agent(module, payload: dict, clock: Callable[[], float]) -> Age
         summarize_state, game_state, team_id, player_id, module.POSITION_LABEL
     )
     model_start = clock()
-    response = module.agent(prompt)
+    with model_deadline(deadline_seconds):
+        response = module.agent(prompt)
     model_end = clock()
     model_latency_ms = (model_end - model_start) * 1000
     raw = str(response)
